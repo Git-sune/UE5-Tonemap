@@ -4,7 +4,7 @@
 
 Working AgX tonemapping implementation for Unreal Engine 5.7 (tested with version UE5.73 on MacBook)
 
-##Installation
+## Installation
 
 Download and copy all files into following directory 
 ```[your UE5 Directory]/Engine/Shaders/Private```
@@ -13,9 +13,9 @@ Open your Unreal Engine project and execute following command in the console (de
 ```RecompileShaders changed```
 
 
-##Switch Tonemapper
-Since the change apply to all your projects (we are changing internal shaders) you can switch the tonemapper by
-opening the file ```TonemapCommon.ush``` and change following line
+## Switch Tonemapper
+Since the change apply to all your projects (since we are changing internal shaders inside the editor) you can switch back by
+opening the file ```TonemapCommon.ush``` and change ```USE_TONEMAP 1``` to ```USE_TONEMAP 0``` in the following line and use ```RecompileShaders changed``` again.
 
 ```
 #ifndef USE_TONEMAP
@@ -23,12 +23,12 @@ opening the file ```TonemapCommon.ush``` and change following line
 #endif
 ```
 
-##Custom Tonemapper
+## Custom Tonemapper
 
-```AgXTonemap.ush``` is an isolated file, feel free to modify it (or use as a startpoing)
+AgX is found in an isolated file ```AgXTonemap.ush```, feel free to modify the code (or use it as your starting point)
 
 
-##Implementations
+## Implementations
 
 - ACES1.0 (UE5 default)
 - AgX implemented
