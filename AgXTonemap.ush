@@ -1,0 +1,174 @@
+/*=============================================================================
+	Copyright Gitsune	
+
+	AgXTonemap.ush: AgX tonemapping implementation
+	Based on Troy Sobotka's AgX formulation.
+	https://github.com/sobotka/AgX
+=============================================================================*/
+
+#pragma once
+
+// AgX EV range constants
+static const float AgX_MinEv = -12.47393f;
+static const float AgX_MaxEv =   4.026069f;
+
+// sRGB to AgX inset matrix (pre-formation)
+static const float3x3 AgX_InsetMatrix =
+{
+	0.842479062253094f,  0.0784335999999992f, 0.0792237451477643f,
+	0.0423282422610123f, 0.878468636469772f,  0.0791661274605434f,
+	0.0423756549057051f, 0.0784336f,          0.879142973793104f
+};
+
+// AgX outset matrix (post-formation, inverse of inset)
+static const float3x3 AgX_OutsetMatrix =
+{
+	 1.19687900512017f,  -0.0980208811401368f, -0.0990297440797205f,
+	-0.0528968517574562f, 1.15190312990417f,   -0.0989611768448433f,
+	-0.0529716355144438f,-0.0980434501171241f,  1.15107367264116f
+};
+
+// 6th-order polynomial sigmoid approximation (attempt to match AgX default look)
+float3 AgXDefaultContrastApprox(float3 x)
+{
+	float3 x2 = x * x;
+	float3 x4 = x2 * x2;
+
+	return + 15.5f     * x4 * x2
+	       - 40.14f    * x4 * x
+	       + 31.96f    * x4
+	       - 6.868f    * x2 * x
+	       + 0.4298f   * x2
+	       + 0.1191f   * x
+	       - 0.00232f;
+}
+
+// Derivative of the sigmoid for Newton's method inverse
+float3 AgXDefaultContrastApproxDeriv(float3 x)
+{
+	float3 x2 = x * x;
+	float3 x3 = x2 * x;
+	float3 x4 = x2 * x2;
+
+	return + 15.5f  * 6.0f * x4 * x
+	       - 40.14f * 5.0f * x4
+	       + 31.96f * 4.0f * x3
+	       - 6.868f * 3.0f * x2
+	       + 0.4298f* 2.0f * x
+	       + 0.1191f;
+}
+
+// Core AgX transform: linear sRGB in -> AgX display-encoded sRGB out
+// MaxEv parameter allows overriding the highlight range for HDR
+float3 AgXCore(float3 LinearSRGB, float MaxEv)
+{
+	// Inset matrix (sRGB -> AgX working)
+	float3 val = mul(AgX_InsetMatrix, LinearSRGB);
+
+	// Log2 encoding with EV range clamping
+	val = max(val, 1e-10f);
+	val = log2(val);
+	val = (val - AgX_MinEv) / (MaxEv - AgX_MinEv);
+	val = saturate(val);
+
+	// Apply sigmoid contrast
+	val = AgXDefaultContrastApprox(val);
+
+	// Outset matrix (AgX working -> sRGB)
+	val = mul(AgX_OutsetMatrix, val);
+	val = saturate(val);
+
+	return val;
+}
+
+// SDR tonemap: AP1 in -> AP1 out (drop-in replacement for FilmToneMap)
+half3 AgXToneMap(half3 ColorAP1)
+{
+	const float3x3 AP1_2_sRGB = mul(XYZ_2_sRGB_MAT, mul(D60_2_D65_CAT, AP1_2_XYZ_MAT));
+	const float3x3 sRGB_2_AP1 = mul(XYZ_2_AP1_MAT, mul(D65_2_D60_CAT, sRGB_2_XYZ_MAT));
+
+	// Convert from AP1 to linear sRGB for AgX processing
+	float3 LinearSRGB = max(0.0f, mul(AP1_2_sRGB, float3(ColorAP1)));
+
+	// Apply AgX core transform (SDR range)
+	float3 AgXResult = AgXCore(LinearSRGB, AgX_MaxEv);
+
+	// AgX output is display-referred sRGB, linearize it
+	// The sigmoid outputs in ~display-encoded space, undo the sRGB curve
+	float3 LinearResult = sRGBToLinear(AgXResult);
+
+	// Convert back to AP1
+	return half3(max(0.0f, mul(sRGB_2_AP1, LinearResult)));
+}
+
+// Inverse tonemap: display sRGB in -> working color space out (drop-in replacement for FilmToneMapInverse)
+half3 AgXToneMapInverse(half3 ToneColor)
+{
+	const float3x3 sRGB_2_AP1 = mul(XYZ_2_AP1_MAT, mul(D65_2_D60_CAT, sRGB_2_XYZ_MAT));
+	const float3x3 AP1_2_sRGB = mul(XYZ_2_sRGB_MAT, mul(D60_2_D65_CAT, AP1_2_XYZ_MAT));
+
+	// Input is display-referred sRGB, apply sRGB curve to get back to sigmoid output space
+	float3 DisplaySRGB = saturate(float3(ToneColor));
+	float3 SigmoidVal = LinearToSrgb(DisplaySRGB);
+
+	// Invert the outset matrix
+	float3 val = mul(AgX_InsetMatrix, SigmoidVal);
+	val = saturate(val);
+
+	// Newton's method to invert the sigmoid
+	// We want to find x such that AgXDefaultContrastApprox(x) = val
+	float3 x = val; // initial guess
+	[unroll]
+	for (int i = 0; i < 8; i++)
+	{
+		float3 f = AgXDefaultContrastApprox(x) - val;
+		float3 df = AgXDefaultContrastApproxDeriv(x);
+		x = x - f / max(df, 1e-6f);
+		x = saturate(x);
+	}
+
+	// Undo the log2 encoding
+	float3 LogVal = x * (AgX_MaxEv - AgX_MinEv) + AgX_MinEv;
+	float3 LinearSRGB = exp2(LogVal);
+
+	// Undo the inset matrix
+	LinearSRGB = mul(AgX_OutsetMatrix, LinearSRGB);
+	LinearSRGB = max(0.0f, LinearSRGB);
+
+	// Convert from sRGB to working color space
+#if WORKING_COLOR_SPACE_IS_SRGB
+	return half3(LinearSRGB);
+#else
+	return half3(mul(XYZ_TO_RGB_WORKING_COLOR_SPACE_MAT, mul(sRGB_2_XYZ_MAT, LinearSRGB)));
+#endif
+}
+
+// HDR output transform: working color space in -> AP1 nits out
+// Drop-in replacement for ACESOutputTransform in HDR paths
+float3 AgXOutputTransform(float3 WorkingColorSpaceColor, float SceneColorMultiplier, float PeakLuminance)
+{
+	const float3x3 WCS_2_sRGB = mul(XYZ_2_sRGB_MAT, (float3x3)WorkingColorSpace.ToXYZ);
+	const float3x3 sRGB_2_AP1 = mul(XYZ_2_AP1_MAT, mul(D65_2_D60_CAT, sRGB_2_XYZ_MAT));
+
+	// Apply scene color multiplier
+	float3 ScaledColor = WorkingColorSpaceColor * SceneColorMultiplier;
+
+	// Convert to linear sRGB
+	float3 LinearSRGB = max(0.0f, mul(WCS_2_sRGB, ScaledColor));
+
+	// Compute extended MaxEv based on peak luminance
+	// Reference white = 100 nits (SDR reference), extend EV range for HDR headroom
+	float HDRHeadroom = log2(PeakLuminance / 100.0f);
+	float MaxEvHDR = AgX_MaxEv + HDRHeadroom;
+
+	// Apply AgX core with extended range
+	float3 AgXResult = AgXCore(LinearSRGB, MaxEvHDR);
+
+	// The AgX result is 0-1 normalized display-referred
+	// Scale to peak luminance in nits for HDR output
+	float3 LinearResult = sRGBToLinear(AgXResult);
+	float3 NitsResult = LinearResult * PeakLuminance;
+
+	// Convert to AP1 gamut (matching ACESOutputTransform return convention)
+	return mul(sRGB_2_AP1, NitsResult);
+}
