@@ -34,7 +34,7 @@ AgX is found in an isolated file ```AgXTonemap.ush```, feel free to modify the c
 - AgX implemented
 - GT7 not yet implemented
 
-##Credits
-AgX tonemapping implementation based on [Troy Sobotka's AgX]([https://choosealicense.com/licenses/mit/](https://github.com/sobotka/AgX) formulation.
+## Credits
+AgX tonemapping implementation based on [Troy Sobotka's AgX](https://github.com/sobotka/AgX) formulation.
 
 
